@@ -46,10 +46,20 @@ export const useUpdateMemoryMutation = (
   );
 };
 
-export type UpdateMemoryPreferencesParams = { memories: boolean };
+export type UpdateMemoryPreferencesParams = {
+  memories?: boolean;
+  memoryCompactionEnabled?: boolean;
+  memoryCompactionTargetRatio?: number;
+  memoryCompactionSummaryChars?: number;
+};
 export type UpdateMemoryPreferencesResponse = {
   updated: boolean;
-  preferences: { memories: boolean };
+  preferences: {
+    memories: boolean;
+    memoryCompactionEnabled?: boolean;
+    memoryCompactionTargetRatio?: number;
+    memoryCompactionSummaryChars?: number;
+  };
 };
 
 export const useUpdateMemoryPreferencesMutation = (

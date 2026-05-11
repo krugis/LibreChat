@@ -379,7 +379,8 @@ class BaseClient {
           break;
         }
         const poppedMessage = messages.pop();
-        const { tokenCount } = poppedMessage;
+        const tokenCount =
+          Number(poppedMessage?.tokenCount) || this.getTokenCountForMessage(poppedMessage);
 
         if (poppedMessage && currentTokenCount + tokenCount <= remainingContextTokens) {
           context.push(poppedMessage);
@@ -403,6 +404,199 @@ class BaseClient {
       context: context.reverse(),
       remainingContextTokens,
       messagesToRefine: prunedMemory,
+    };
+  }
+
+  /**
+   * @returns {{ enabled: boolean; targetRatio: number; summaryChars: number }}
+   */
+  getCompactionSettings() {
+    const personalization = this.options?.req?.user?.personalization ?? {};
+    const enabled =
+      personalization.memories !== false && personalization.memoryCompactionEnabled !== false;
+
+    const rawTargetRatio = Number(personalization.memoryCompactionTargetRatio ?? 0.9);
+    const targetRatio =
+      Number.isFinite(rawTargetRatio) && rawTargetRatio >= 0.5 && rawTargetRatio <= 1
+        ? rawTargetRatio
+        : 0.9;
+
+    const rawSummaryChars = Number(personalization.memoryCompactionSummaryChars ?? 280);
+    const summaryChars =
+      Number.isInteger(rawSummaryChars) && rawSummaryChars >= 100 && rawSummaryChars <= 1000
+        ? rawSummaryChars
+        : 280;
+
+    return {
+      enabled,
+      targetRatio,
+      summaryChars,
+    };
+  }
+
+  /**
+   * @param {Array<{ role?: string; content?: string | Array<unknown> }> | undefined} prompt
+   * @returns {number}
+   */
+  estimatePromptTokens(prompt) {
+    if (!Array.isArray(prompt) || prompt.length === 0) {
+      return 0;
+    }
+
+    return prompt.reduce(
+      (total, message) => total + (this.getTokenCountForMessage(message) ?? 0),
+      0,
+    );
+  }
+
+  /**
+   * @param {TMessage} message
+   * @returns {string}
+   */
+  getMessageText(message) {
+    if (typeof message?.text === 'string' && message.text.trim().length > 0) {
+      return message.text;
+    }
+
+    if (typeof message?.content === 'string' && message.content.trim().length > 0) {
+      return message.content;
+    }
+
+    if (Array.isArray(message?.content)) {
+      return message.content
+        .map((part) => {
+          if (!part || typeof part !== 'object') {
+            return '';
+          }
+          if (part.type === ContentTypes.TEXT) {
+            return part.text ?? part[ContentTypes.TEXT] ?? '';
+          }
+          if (part.type === ContentTypes.THINK) {
+            return part[ContentTypes.THINK] ?? '';
+          }
+          return '';
+        })
+        .filter(Boolean)
+        .join('\n');
+    }
+
+    return '';
+  }
+
+  /**
+   * @param {TMessage[]} messages
+   * @param {number} summaryChars
+   * @returns {string | undefined}
+   */
+  createOverflowSummary(messages, summaryChars) {
+    const lines = [];
+
+    for (const message of messages) {
+      const text = this.getMessageText(message).trim();
+      if (!text) {
+        continue;
+      }
+
+      const role = message?.isCreatedByUser === true ? 'User' : 'Assistant';
+      const compactText = text.replace(/\s+/g, ' ').slice(0, summaryChars);
+      lines.push(`- ${role}: ${compactText}`);
+    }
+
+    if (lines.length === 0) {
+      return;
+    }
+
+    return `Compressed context from earlier turns:\n${lines.join('\n')}`;
+  }
+
+  /**
+   * @param {string} summary
+   * @returns {Promise<void>}
+   */
+  async persistOverflowSummary(summary) {
+    if (!summary || typeof db.setMemory !== 'function' || !this.options?.req?.user?.id) {
+      return;
+    }
+
+    try {
+      const rawTokenCount =
+        typeof this.getTokenCount === 'function' ? this.getTokenCount(summary) : summary.length;
+      const tokenCount = Number.isFinite(rawTokenCount) ? rawTokenCount : summary.length;
+      await db.setMemory({
+        userId: this.options.req.user.id,
+        key: 'context_overflow',
+        value: summary,
+        tokenCount,
+      });
+    } catch (error) {
+      logger.error('[BaseClient] Failed to persist overflow summary memory', error);
+    }
+  }
+
+  /**
+   * @param {{
+   *  prompt: Array<{ role?: string; content?: string }> | undefined,
+   *  promptTokens: number | undefined,
+   *  tokenCountMap: Record<string, number> | null,
+   *  parentMessageId: string,
+   *  buildMessagesOptions: Record<string, unknown>,
+   *  opts: Record<string, unknown>
+   * }} params
+   * @returns {Promise<{ prompt: Array<{ role?: string; content?: string }>, promptTokens: number, tokenCountMap: Record<string, number> | null } | null>}
+   */
+  async compactContextIfNeeded({
+    prompt,
+    promptTokens,
+    tokenCountMap,
+    parentMessageId,
+    buildMessagesOptions,
+    opts,
+  }) {
+    const { enabled, targetRatio, summaryChars } = this.getCompactionSettings();
+    const maxContextTokens = Number(this.maxContextTokens);
+
+    if (!enabled || !Number.isFinite(maxContextTokens) || maxContextTokens <= 0) {
+      return null;
+    }
+
+    const estimatedPromptTokens = this.estimatePromptTokens(prompt);
+    const resolvedPromptTokens =
+      typeof promptTokens === 'number' && Number.isFinite(promptTokens)
+        ? promptTokens
+        : estimatedPromptTokens;
+
+    if (resolvedPromptTokens <= maxContextTokens) {
+      return null;
+    }
+
+    const targetContextTokens = Math.max(1, Math.floor(maxContextTokens * targetRatio));
+    const { context, messagesToRefine } = await this.getMessagesWithinTokenLimit({
+      messages: this.currentMessages,
+      maxContextTokens: targetContextTokens,
+    });
+
+    if (
+      !Array.isArray(context) ||
+      context.length === 0 ||
+      context.length >= this.currentMessages.length
+    ) {
+      return null;
+    }
+
+    const compactedBuild = await this.buildMessages(context, parentMessageId, buildMessagesOptions, opts);
+    const compactedPromptTokens = this.estimatePromptTokens(compactedBuild.prompt);
+    const summary = this.createOverflowSummary(messagesToRefine, summaryChars);
+    if (summary) {
+      await this.persistOverflowSummary(summary);
+    }
+
+    return {
+      prompt: compactedBuild.prompt,
+      promptTokens:
+        typeof compactedBuild.promptTokens === 'number' && Number.isFinite(compactedBuild.promptTokens)
+          ? compactedBuild.promptTokens
+          : compactedPromptTokens,
+      tokenCountMap: compactedBuild.tokenCountMap ?? tokenCountMap,
     };
   }
 
@@ -463,6 +657,7 @@ class BaseClient {
      */
     const parentMessageId = isEdited ? head : userMessage.messageId;
     this.parentMessageId = parentMessageId;
+    const buildMessagesOptions = this.getBuildMessagesOptions(opts);
     let {
       prompt: payload,
       tokenCountMap,
@@ -470,9 +665,24 @@ class BaseClient {
     } = await this.buildMessages(
       this.currentMessages,
       parentMessageId,
-      this.getBuildMessagesOptions(opts),
+      buildMessagesOptions,
       opts,
     );
+
+    const compactedContext = await this.compactContextIfNeeded({
+      prompt: payload,
+      promptTokens,
+      tokenCountMap,
+      parentMessageId,
+      buildMessagesOptions,
+      opts,
+    });
+
+    if (compactedContext) {
+      payload = compactedContext.prompt;
+      promptTokens = compactedContext.promptTokens;
+      tokenCountMap = compactedContext.tokenCountMap;
+    }
 
     if (tokenCountMap && tokenCountMap[userMessage.messageId]) {
       userMessage.tokenCount = tokenCountMap[userMessage.messageId];
@@ -974,6 +1184,14 @@ class BaseClient {
       tokensPerName = -1;
     }
 
+    const countValueTokens = (value) => {
+      if (typeof this.getTokenCount === 'function') {
+        return this.getTokenCount(value);
+      }
+
+      return String(value ?? '').length;
+    };
+
     const processValue = (value) => {
       if (Array.isArray(value)) {
         for (let item of value) {
@@ -990,17 +1208,17 @@ class BaseClient {
           if (item.type === ContentTypes.TOOL_CALL && item.tool_call != null) {
             const toolName = item.tool_call?.name || '';
             if (toolName != null && toolName && typeof toolName === 'string') {
-              numTokens += this.getTokenCount(toolName);
+              numTokens += countValueTokens(toolName);
             }
 
             const args = item.tool_call?.args || '';
             if (args != null && args && typeof args === 'string') {
-              numTokens += this.getTokenCount(args);
+              numTokens += countValueTokens(args);
             }
 
             const output = item.tool_call?.output || '';
             if (output != null && output && typeof output === 'string') {
-              numTokens += this.getTokenCount(output);
+              numTokens += countValueTokens(output);
             }
             continue;
           }
@@ -1014,11 +1232,11 @@ class BaseClient {
           processValue(nestedValue);
         }
       } else if (typeof value === 'string') {
-        numTokens += this.getTokenCount(value);
+        numTokens += countValueTokens(value);
       } else if (typeof value === 'number') {
-        numTokens += this.getTokenCount(value.toString());
+        numTokens += countValueTokens(value.toString());
       } else if (typeof value === 'boolean') {
-        numTokens += this.getTokenCount(value.toString());
+        numTokens += countValueTokens(value.toString());
       }
     };
 

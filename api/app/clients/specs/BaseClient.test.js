@@ -36,9 +36,10 @@ jest.mock('~/models', () => ({
   deleteFiles: jest.fn(),
   getFiles: jest.fn(),
   updateFileUsage: jest.fn(),
+  setMemory: jest.fn(),
 }));
 
-const { getConvo, saveConvo, saveMessage } = require('~/models');
+const { getConvo, saveConvo, saveMessage, setMemory } = require('~/models');
 
 jest.mock('@librechat/agents', () => {
   const actual = jest.requireActual('@librechat/agents');
@@ -80,6 +81,7 @@ describe('BaseClient', () => {
 
   beforeEach(() => {
     TestClient = initializeFakeClient(apiKey, options, fakeMessages);
+    setMemory.mockClear();
     TestClient.summarizeMessages = jest.fn().mockResolvedValue({
       summaryMessage: {
         role: 'system',
@@ -1254,6 +1256,153 @@ describe('BaseClient', () => {
       );
       expect(userSave[0].files).toHaveLength(1);
       expect(userSave[0].files[0].file_id).toBe('file-abc');
+    });
+  });
+
+  describe('context compaction', () => {
+    test('compacts overflow context and persists a summary memory', async () => {
+      TestClient.maxContextTokens = 30;
+      TestClient.options.req = {
+        user: {
+          id: 'user-1',
+          personalization: {
+            memories: true,
+            memoryCompactionEnabled: true,
+            memoryCompactionTargetRatio: 0.5,
+            memoryCompactionSummaryChars: 120,
+          },
+        },
+      };
+
+      TestClient.currentMessages = [
+        { isCreatedByUser: true, text: 'A'.repeat(40), tokenCount: 40 },
+        { isCreatedByUser: false, text: 'B'.repeat(20), tokenCount: 20 },
+        { isCreatedByUser: true, text: 'C'.repeat(10), tokenCount: 10 },
+      ];
+
+      TestClient.buildMessages.mockResolvedValue({
+        prompt: [{ role: 'user', content: 'latest only' }],
+        tokenCountMap: { test: 1 },
+        promptTokens: 12,
+      });
+
+      const result = await TestClient.compactContextIfNeeded({
+        prompt: [
+          { role: 'user', content: 'A'.repeat(40) },
+          { role: 'assistant', content: 'B'.repeat(20) },
+          { role: 'user', content: 'C'.repeat(10) },
+        ],
+        promptTokens: 70,
+        tokenCountMap: null,
+        parentMessageId: 'parent-1',
+        buildMessagesOptions: {},
+        opts: {},
+      });
+
+      expect(result).not.toBeNull();
+      expect(result.promptTokens).toBe(12);
+      expect(setMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-1',
+          key: 'context_overflow',
+        }),
+      );
+    });
+
+    test('does not compact when memories are disabled', async () => {
+      TestClient.maxContextTokens = 30;
+      TestClient.options.req = {
+        user: {
+          id: 'user-1',
+          personalization: {
+            memories: false,
+            memoryCompactionEnabled: true,
+          },
+        },
+      };
+
+      TestClient.currentMessages = [
+        { isCreatedByUser: true, text: 'A'.repeat(40), tokenCount: 40 },
+        { isCreatedByUser: false, text: 'B'.repeat(20), tokenCount: 20 },
+      ];
+
+      const result = await TestClient.compactContextIfNeeded({
+        prompt: [
+          { role: 'user', content: 'A'.repeat(40) },
+          { role: 'assistant', content: 'B'.repeat(20) },
+        ],
+        promptTokens: 70,
+        tokenCountMap: null,
+        parentMessageId: 'parent-1',
+        buildMessagesOptions: {},
+        opts: {},
+      });
+
+      expect(result).toBeNull();
+      expect(setMemory).not.toHaveBeenCalled();
+    });
+
+    test('persists overflow summary when getTokenCount is unavailable', async () => {
+      TestClient.options.req = {
+        user: {
+          id: 'user-1',
+          personalization: { memories: true, memoryCompactionEnabled: true },
+        },
+      };
+      TestClient.getTokenCount = undefined;
+
+      await TestClient.persistOverflowSummary('summary text for fallback');
+
+      expect(setMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-1',
+          key: 'context_overflow',
+          tokenCount: 'summary text for fallback'.length,
+        }),
+      );
+    });
+
+    test('compacts without throwing when getTokenCount is unavailable', async () => {
+      TestClient.maxContextTokens = 30;
+      TestClient.options.req = {
+        user: {
+          id: 'user-1',
+          personalization: {
+            memories: true,
+            memoryCompactionEnabled: true,
+            memoryCompactionTargetRatio: 0.5,
+            memoryCompactionSummaryChars: 120,
+          },
+        },
+      };
+      TestClient.getTokenCount = undefined;
+
+      TestClient.currentMessages = [
+        { isCreatedByUser: true, text: 'A'.repeat(40), tokenCount: 40 },
+        { isCreatedByUser: false, text: 'B'.repeat(20), tokenCount: 20 },
+        { isCreatedByUser: true, text: 'C'.repeat(10), tokenCount: 10 },
+      ];
+
+      TestClient.buildMessages.mockResolvedValue({
+        prompt: [{ role: 'user', content: 'latest only' }],
+        tokenCountMap: { test: 1 },
+        promptTokens: 12,
+      });
+
+      await expect(
+        TestClient.compactContextIfNeeded({
+          prompt: [
+            { role: 'user', content: 'A'.repeat(40) },
+            { role: 'assistant', content: 'B'.repeat(20) },
+            { role: 'user', content: 'C'.repeat(10) },
+          ],
+          promptTokens: 70,
+          tokenCountMap: null,
+          parentMessageId: 'parent-1',
+          buildMessagesOptions: {},
+          opts: {},
+        }),
+      ).resolves.not.toBeNull();
     });
   });
 });

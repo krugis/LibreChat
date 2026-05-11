@@ -8,6 +8,7 @@ const {
   createMemory,
   deleteMemory,
   setMemory,
+  updateMemoryPreferences,
 } = require('~/models');
 const { requireJwtAuth, configMiddleware } = require('~/server/middleware');
 
@@ -162,27 +163,77 @@ router.post('/', memoryPayloadLimit, checkMemoryCreate, configMiddleware, async 
 /**
  * PATCH /memories/preferences
  * Updates the user's memory preferences (e.g., enabling/disabling memories).
- * Body: { memories: boolean }
- * Returns 200 and { updated: true, preferences: { memories: boolean } } when successful.
+ * Body: {
+ *   memories?: boolean,
+ *   memoryCompactionEnabled?: boolean,
+ *   memoryCompactionTargetRatio?: number,
+ *   memoryCompactionSummaryChars?: number,
+ * }
+ * Returns 200 and { updated: true, preferences: {...} } when successful.
  */
 router.patch('/preferences', checkMemoryOptOut, async (req, res) => {
-  const { memories } = req.body;
+  const {
+    memories,
+    memoryCompactionEnabled,
+    memoryCompactionTargetRatio,
+    memoryCompactionSummaryChars,
+  } = req.body ?? {};
 
-  if (typeof memories !== 'boolean') {
-    return res.status(400).json({ error: 'memories must be a boolean value.' });
+  const hasMemories = typeof memories === 'boolean';
+  const hasCompactionEnabled = typeof memoryCompactionEnabled === 'boolean';
+  const hasTargetRatio = typeof memoryCompactionTargetRatio === 'number';
+  const hasSummaryChars = typeof memoryCompactionSummaryChars === 'number';
+
+  if (!hasMemories && !hasCompactionEnabled && !hasTargetRatio && !hasSummaryChars) {
+    return res.status(400).json({
+      error:
+        'At least one valid preference is required: memories, memoryCompactionEnabled, memoryCompactionTargetRatio, memoryCompactionSummaryChars.',
+    });
+  }
+
+  if (hasTargetRatio && (memoryCompactionTargetRatio < 0.5 || memoryCompactionTargetRatio > 1)) {
+    return res.status(400).json({
+      error: 'memoryCompactionTargetRatio must be between 0.5 and 1.0.',
+    });
+  }
+
+  if (
+    hasSummaryChars &&
+    (!Number.isInteger(memoryCompactionSummaryChars) ||
+      memoryCompactionSummaryChars < 100 ||
+      memoryCompactionSummaryChars > 1000)
+  ) {
+    return res.status(400).json({
+      error: 'memoryCompactionSummaryChars must be an integer between 100 and 1000.',
+    });
   }
 
   try {
     const updatedUser = await toggleUserMemories(req.user.id, memories);
 
-    if (!updatedUser) {
+    const finalUser =
+      hasCompactionEnabled || hasTargetRatio || hasSummaryChars
+        ? await updateMemoryPreferences(req.user.id, {
+            ...(hasMemories ? { memories } : {}),
+            ...(hasCompactionEnabled ? { memoryCompactionEnabled } : {}),
+            ...(hasTargetRatio ? { memoryCompactionTargetRatio } : {}),
+            ...(hasSummaryChars ? { memoryCompactionSummaryChars } : {}),
+          })
+        : updatedUser;
+
+    if (!finalUser) {
       return res.status(404).json({ error: 'User not found.' });
     }
 
     res.json({
       updated: true,
       preferences: {
-        memories: updatedUser.personalization?.memories ?? true,
+        memories: finalUser.personalization?.memories ?? true,
+        memoryCompactionEnabled: finalUser.personalization?.memoryCompactionEnabled ?? true,
+        memoryCompactionTargetRatio:
+          finalUser.personalization?.memoryCompactionTargetRatio ?? 0.9,
+        memoryCompactionSummaryChars:
+          finalUser.personalization?.memoryCompactionSummaryChars ?? 280,
       },
     });
   } catch (error) {

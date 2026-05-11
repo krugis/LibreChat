@@ -210,12 +210,17 @@ export function createUserMethods(mongoose: typeof import('mongoose')) {
   }
 
   /**
-   * Update a user's personalization memories setting.
+   * Update user memory personalization settings.
    * Handles the edge case where the personalization object doesn't exist.
    */
-  async function toggleUserMemories(
+  async function updateMemoryPreferences(
     userId: string,
-    memoriesEnabled: boolean,
+    preferences: {
+      memories?: boolean;
+      memoryCompactionEnabled?: boolean;
+      memoryCompactionTargetRatio?: number;
+      memoryCompactionSummaryChars?: number;
+    },
   ): Promise<IUser | null> {
     const User = mongoose.models.User;
 
@@ -225,17 +230,44 @@ export function createUserMethods(mongoose: typeof import('mongoose')) {
       return null;
     }
 
-    // Use $set to update the nested field, which will create the personalization object if it doesn't exist
+    const setPayload: Record<string, unknown> = {};
+    if (typeof preferences.memories === 'boolean') {
+      setPayload['personalization.memories'] = preferences.memories;
+    }
+    if (typeof preferences.memoryCompactionEnabled === 'boolean') {
+      setPayload['personalization.memoryCompactionEnabled'] = preferences.memoryCompactionEnabled;
+    }
+    if (typeof preferences.memoryCompactionTargetRatio === 'number') {
+      setPayload['personalization.memoryCompactionTargetRatio'] =
+        preferences.memoryCompactionTargetRatio;
+    }
+    if (typeof preferences.memoryCompactionSummaryChars === 'number') {
+      setPayload['personalization.memoryCompactionSummaryChars'] =
+        preferences.memoryCompactionSummaryChars;
+    }
+
+    if (Object.keys(setPayload).length === 0) {
+      return user as unknown as IUser;
+    }
+
     const updateOperation = {
-      $set: {
-        'personalization.memories': memoriesEnabled,
-      },
+      $set: setPayload,
     };
 
     return (await User.findByIdAndUpdate(userId, updateOperation, {
       new: true,
       runValidators: true,
     }).lean()) as IUser | null;
+  }
+
+  /**
+   * Backward-compatible wrapper for existing callers.
+   */
+  async function toggleUserMemories(
+    userId: string,
+    memoriesEnabled: boolean,
+  ): Promise<IUser | null> {
+    return updateMemoryPreferences(userId, { memories: memoriesEnabled });
   }
 
   /**
@@ -353,6 +385,7 @@ export function createUserMethods(mongoose: typeof import('mongoose')) {
     generateToken,
     deleteUserById,
     updateUserPlugins,
+    updateMemoryPreferences,
     toggleUserMemories,
   };
 }

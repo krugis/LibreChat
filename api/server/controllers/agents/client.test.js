@@ -29,6 +29,7 @@ jest.mock('~/server/services/MCP', () => ({
 jest.mock('~/models', () => ({
   getAgent: jest.fn(),
   getRoleByName: jest.fn(),
+  setMemory: jest.fn(),
 }));
 
 // Mock getMCPManager
@@ -2086,6 +2087,112 @@ describe('AgentClient - titleConvo', () => {
       ).resolves.not.toThrow();
 
       expect(client.options.agent.instructions).toContain(memoryContent);
+    });
+  });
+
+  describe('buildMessages - context compaction', () => {
+    let client;
+    let mockReq;
+    let mockOptions;
+    let models;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      models = require('~/models');
+
+      mockReq = {
+        user: {
+          id: 'user-123',
+          personalization: {
+            memories: true,
+          },
+        },
+        body: {
+          endpoint: EModelEndpoint.openAI,
+        },
+        config: {
+          memory: {
+            disabled: false,
+          },
+        },
+      };
+
+      mockOptions = {
+        req: mockReq,
+        res: {},
+        endpoint: EModelEndpoint.agents,
+        agent: {
+          id: 'primary-agent',
+          endpoint: EModelEndpoint.openAI,
+          provider: EModelEndpoint.openAI,
+          instructions: 'Primary agent instructions',
+          model_parameters: {
+            model: 'gpt-4',
+          },
+          tools: [],
+        },
+      };
+
+      client = new AgentClient(mockOptions);
+      client.useMemory = jest.fn().mockResolvedValue(undefined);
+      client.maxContextTokens = 40;
+      client.shouldSummarize = false;
+    });
+
+    it('should compact context and persist overflow summary when memories are enabled', async () => {
+      const messages = [
+        {
+          messageId: 'm1',
+          parentMessageId: Constants.NO_PARENT,
+          sender: 'User',
+          text: 'This is a very long message that should trigger compaction because token budget is tiny.',
+          isCreatedByUser: true,
+          tokenCount: 50,
+        },
+        {
+          messageId: 'm2',
+          parentMessageId: 'm1',
+          sender: 'Assistant',
+          text: 'Acknowledged with similarly long content to exceed context budget quickly.',
+          isCreatedByUser: false,
+          tokenCount: 50,
+        },
+      ];
+
+      await client.buildMessages(messages, 'm2', {}, {});
+
+      expect(models.setMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-123',
+          key: 'context_overflow',
+        }),
+      );
+    });
+
+    it('should not compact context when memories are disabled from UI', async () => {
+      mockReq.user.personalization.memories = false;
+      const messages = [
+        {
+          messageId: 'm1',
+          parentMessageId: Constants.NO_PARENT,
+          sender: 'User',
+          text: 'Long content should not trigger persistence when memories are off.',
+          isCreatedByUser: true,
+          tokenCount: 50,
+        },
+        {
+          messageId: 'm2',
+          parentMessageId: 'm1',
+          sender: 'Assistant',
+          text: 'Another long line for overflow simulation.',
+          isCreatedByUser: false,
+          tokenCount: 50,
+        },
+      ];
+
+      await client.buildMessages(messages, 'm2', {}, {});
+
+      expect(models.setMemory).not.toHaveBeenCalled();
     });
   });
 

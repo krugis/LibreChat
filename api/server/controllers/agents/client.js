@@ -182,7 +182,7 @@ class AgentClient extends BaseClient {
 
   async buildMessages(messages, parentMessageId, _buildOptions, opts) {
     /** Always pass mapMethod; getMessagesForConversation applies it only to messages with addedConvo flag */
-    const orderedMessages = this.constructor.getMessagesForConversation({
+    let orderedMessages = this.constructor.getMessagesForConversation({
       messages,
       parentMessageId,
       summary: this.shouldSummarize,
@@ -241,6 +241,45 @@ class AgentClient extends BaseClient {
         this.options.req,
         orderedMessages[orderedMessages.length - 1].text,
       );
+    }
+
+    if (this.shouldCompactContext() && Number(this.maxContextTokens) > 0) {
+      const targetContextTokens = Number(this.maxContextTokens);
+      let tokenEstimate = 0;
+
+      for (const message of orderedMessages) {
+        if (!message?.tokenCount) {
+          const formatted = formatMessage({
+            message,
+            userName: this.options?.name,
+            assistantName: this.options?.modelLabel,
+          });
+          message.tokenCount = countFormattedMessageTokens(formatted, this.getEncoding());
+        }
+
+        tokenEstimate += Number(message.tokenCount) || 0;
+      }
+
+      if (tokenEstimate > targetContextTokens) {
+        const { context, messagesToRefine } = await this.getMessagesWithinTokenLimit({
+          messages: orderedMessages,
+          maxContextTokens: targetContextTokens,
+        });
+
+        const overflowSummary = this.createOverflowSummary(messagesToRefine);
+        if (overflowSummary) {
+          await this.persistOverflowSummary(overflowSummary);
+        }
+
+        if (context.length > 0) {
+          orderedMessages = context;
+          logger.debug('[AgentClient] Applied context compaction', {
+            originalMessages: messages.length,
+            refinedMessages: orderedMessages.length,
+            maxContextTokens: targetContextTokens,
+          });
+        }
+      }
     }
 
     /** @type {Record<number, number>} */
@@ -555,6 +594,103 @@ class AgentClient extends BaseClient {
 
     this.processMemory = processMemory;
     return withoutKeys;
+  }
+
+  /**
+   * Context compaction is tied to the existing memory UI toggle.
+   * When users disable memories, compaction is fully disabled to preserve legacy behavior.
+   * @returns {boolean}
+   */
+  shouldCompactContext() {
+    const user = this.options?.req?.user;
+    return user?.personalization?.memories !== false;
+  }
+
+  /**
+   * @param {TMessage} message
+   * @returns {string}
+   */
+  getMessageText(message) {
+    if (typeof message?.text === 'string' && message.text.trim().length > 0) {
+      return message.text;
+    }
+
+    if (typeof message?.content === 'string' && message.content.trim().length > 0) {
+      return message.content;
+    }
+
+    if (Array.isArray(message?.content)) {
+      return message.content
+        .map((part) => {
+          if (!part || typeof part !== 'object') {
+            return '';
+          }
+          if (part.type === ContentTypes.TEXT) {
+            return part.text ?? part[ContentTypes.TEXT] ?? '';
+          }
+          if (part.type === ContentTypes.THINK) {
+            return part[ContentTypes.THINK] ?? '';
+          }
+          return '';
+        })
+        .filter(Boolean)
+        .join('\n');
+    }
+
+    return '';
+  }
+
+  /**
+   * @param {TMessage[]} messages
+   * @returns {string | undefined}
+   */
+  createOverflowSummary(messages) {
+    const lines = [];
+
+    for (const message of messages) {
+      const text = this.getMessageText(message).trim();
+      if (!text) {
+        continue;
+      }
+
+      const role = message?.isCreatedByUser === true ? 'User' : 'Assistant';
+      const compactText = text.replace(/\s+/g, ' ').slice(0, 280);
+      lines.push(`- ${role}: ${compactText}`);
+    }
+
+    if (lines.length === 0) {
+      return;
+    }
+
+    return `Compressed context from earlier turns:\n${lines.join('\n')}`;
+  }
+
+  /**
+   * Stores overflow summary in existing user memory collection.
+   * This reuses the existing database model and keeps state across turns.
+   * @param {string} summary
+   * @returns {Promise<void>}
+   */
+  async persistOverflowSummary(summary) {
+    if (!summary || typeof db.setMemory !== 'function') {
+      return;
+    }
+
+    try {
+      const tokenCount = countFormattedMessageTokens(
+        { role: 'system', content: summary },
+        this.getEncoding(),
+      );
+
+      await db.setMemory({
+        userId: this.options.req.user.id,
+        key: 'context_overflow',
+        value: summary,
+        tokenCount,
+      });
+    } catch (error) {
+      logger.error('[AgentClient] Failed to persist overflow summary memory', error);
+    }
   }
 
   /**

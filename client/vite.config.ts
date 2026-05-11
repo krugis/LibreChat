@@ -82,7 +82,7 @@ export default defineConfig(({ command }) => ({
           'assets/maskable-icon.png',
           'manifest.webmanifest',
         ],
-        globIgnores: ['images/**/*', '**/*.map', 'index.html'],
+        globIgnores: ['images/**/*', '**/*.map'],
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         navigateFallbackDenylist: [/^\/oauth/, /^\/api/],
       },
@@ -314,6 +314,9 @@ export default defineConfig(({ command }) => ({
       '~': path.join(__dirname, 'src/'),
       $fonts: path.resolve(__dirname, 'public/fonts'),
       'micromark-extension-math': 'micromark-extension-llm-math',
+      // @librechat/client is a workspace package. Pin peer deps to this client workspace.
+      'framer-motion': path.dirname(require.resolve('framer-motion/package.json')),
+      '@react-spring/web': path.dirname(require.resolve('@react-spring/web/package.json')),
     },
   },
 }));

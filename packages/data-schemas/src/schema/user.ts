@@ -130,6 +130,22 @@ const userSchema = new Schema<IUser>(
           type: Boolean,
           default: true,
         },
+        memoryCompactionEnabled: {
+          type: Boolean,
+          default: true,
+        },
+        memoryCompactionTargetRatio: {
+          type: Number,
+          default: 0.9,
+          min: 0.5,
+          max: 1,
+        },
+        memoryCompactionSummaryChars: {
+          type: Number,
+          default: 280,
+          min: 100,
+          max: 1000,
+        },
       },
       default: {},
     },

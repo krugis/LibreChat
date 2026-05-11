@@ -40,6 +40,9 @@ export interface IUser extends Document {
   termsAccepted?: boolean;
   personalization?: {
     memories?: boolean;
+    memoryCompactionEnabled?: boolean;
+    memoryCompactionTargetRatio?: number;
+    memoryCompactionSummaryChars?: number;
   };
   favorites?: Array<{
     agentId?: string;
@@ -87,6 +90,9 @@ export interface UpdateUserRequest {
   termsAccepted?: boolean;
   personalization?: {
     memories?: boolean;
+    memoryCompactionEnabled?: boolean;
+    memoryCompactionTargetRatio?: number;
+    memoryCompactionSummaryChars?: number;
   };
 }
 

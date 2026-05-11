@@ -1024,8 +1024,19 @@ export const updateMemory = (
 };
 
 export const updateMemoryPreferences = (preferences: {
-  memories: boolean;
-}): Promise<{ updated: boolean; preferences: { memories: boolean } }> => {
+  memories?: boolean;
+  memoryCompactionEnabled?: boolean;
+  memoryCompactionTargetRatio?: number;
+  memoryCompactionSummaryChars?: number;
+}): Promise<{
+  updated: boolean;
+  preferences: {
+    memories: boolean;
+    memoryCompactionEnabled?: boolean;
+    memoryCompactionTargetRatio?: number;
+    memoryCompactionSummaryChars?: number;
+  };
+}> => {
   return request.patch(endpoints.memoryPreferences(), preferences);
 };
 

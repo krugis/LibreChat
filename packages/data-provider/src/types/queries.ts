@@ -145,6 +145,13 @@ export type MemoriesResponse = {
   usagePercentage: number | null;
 };
 
+export type MemoryPreferences = {
+  memories: boolean;
+  memoryCompactionEnabled?: boolean;
+  memoryCompactionTargetRatio?: number;
+  memoryCompactionSummaryChars?: number;
+};
+
 export type PrincipalSearchParams = {
   q: string;
   limit?: number;
